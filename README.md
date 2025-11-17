@@ -13,5 +13,5 @@
 
 1. Клонируйте репозиторий:
 ```bash
-git clone https://github.com/your-username/video-motion-analyzer.git
+git clone https://github.com/flowerize/video-motion-analyzer.git
 cd video-motion-analyzer
