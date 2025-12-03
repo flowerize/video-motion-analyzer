@@ -111,6 +111,9 @@ class MainWindow:
         self.video_container.pack(fill="both", expand=True, padx=UI_SETTINGS["padding_medium"], 
                                 pady=UI_SETTINGS["padding_medium"])
         
+        self.video_container.pack_propagate(False)  # Важно: контейнер не будет сжиматься под контент
+        self.video_container.grid_propagate(False)  # Актуально, если внутри grid
+        
         # Метка для отображения видео
         self.video_label = ctk.CTkLabel(
             self.video_container,
@@ -230,27 +233,29 @@ class MainWindow:
             # Конвертируем BGR в RGB
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
-            # Конвертируем в формат для CTkImage
+            # Конвертируем в PIL
             img = Image.fromarray(rgb_frame)
             
-            # Масштабируем изображение под размер метки
-            label_width = self.video_label.winfo_width()
-            label_height = self.video_label.winfo_height()
+            # === Получаем размеры контейнера, а не метки (метка может быть ещё не готова) ===
+            container_width = self.video_container.winfo_width() - 4  # с учётом padx
+            container_height = self.video_container.winfo_height() - 4
             
-            if label_width > 1 and label_height > 1:
-                img = img.resize((label_width, label_height), Image.Resampling.LANCZOS)
+            # Убедимся, что размеры валидны
+            if container_width < 10 or container_height < 10:
+                container_width, container_height = 640, 480  # fallback
+
+            # Масштабируем с сохранением пропорций (опционально)
+            img = img.resize((container_width, container_height), Image.Resampling.LANCZOS)
             
-            ctk_image = ctk.CTkImage(
-                light_image=img,
-                dark_image=img,
-                size=(label_width, label_height)
-            )
-            
-            # Обновляем метку
+            ctk_image = ctk.CTkImage(light_image=img, dark_image=img, size=(container_width, container_height))
             self.video_label.configure(image=ctk_image, text="")
+            
+            # Сохраняем ссылку, чтобы избежать уничтожения garbage collector'ом
+            self.current_video_image = ctk_image
             
         except Exception as e:
             print(f"Ошибка обновления видео: {e}")
+
             
     def update_tracking_stats(self, position: tuple, current_time: float):
         """Обновить статистику трекинга"""
