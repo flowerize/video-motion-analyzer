@@ -1,6 +1,6 @@
 # Video Motion Analyzer
 
-Упрощенный аналог VIANA для анализа движения объектов на видео.
+Программа для трекинга и анализа перемещения объектов
 
 ## Возможности
 
@@ -14,4 +14,5 @@
 1. Клонируйте репозиторий:
 ```bash
 git clone https://github.com/flowerize/video-motion-analyzer.git
+
 cd video-motion-analyzer
