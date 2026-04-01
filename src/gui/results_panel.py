@@ -247,7 +247,34 @@ class ResultsPanel:
         stats_text += f"Макс. скорость: {analysis_results['max_velocity']:.2f} px/с\n"
         stats_text += f"Макс. ускорение: {analysis_results['max_acceleration']:.2f} px/с²\n"
         stats_text += f"Средняя скорость: {analysis_results['avg_velocity']:.2f} px/с\n"
-        stats_text += f"Количество точек: {len(analysis_results['timestamps'])}\n"
+        total_points = len(self.data_analyzer.data)
+        stats_text += f"Количество точек: {total_points}\n"
+        
+        # Детализация треков аналогична прежней панели статистики
+        track_ids = [point.get('track_id') for point in self.data_analyzer.data if point.get('track_id') is not None]
+        unique_tracks = len(set(track_ids))
+        stats_text += f"Количество треков: {unique_tracks}\n"
+        
+        stats_text += "\n=== ДЕТАЛИ ТРЕКИНГА ===\n"
+        if unique_tracks:
+            # Берем последние точки каждого трека
+            latest_points = {}
+            for point in self.data_analyzer.data:
+                track_id = point.get('track_id')
+                if track_id is None:
+                    continue
+                latest_points[track_id] = point
+            recent_points = sorted(latest_points.values(), key=lambda p: p['timestamp'], reverse=True)
+            for point in recent_points[:5]:
+                velocity = point.get('velocity', 0.0)
+                stats_text += (
+                    f" • ID {point.get('track_id')}: ({point['x']}, {point['y']})"
+                    f" v={velocity:.1f} px/с\n"
+                )
+            if len(recent_points) > 5:
+                stats_text += f"   ... и ещё {len(recent_points) - 5} треков\n"
+        else:
+            stats_text += "Нет данных по отдельным трекам\n"
         
         self.stats_text.insert("1.0", stats_text)
         self.stats_text.configure(state="disabled")

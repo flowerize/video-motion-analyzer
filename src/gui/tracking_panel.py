@@ -56,8 +56,8 @@ class TrackingPanel:
         )
         self.apply_btn.pack(fill="x", pady=UI_SETTINGS["padding_small"])
         
-        # Статистика трекинга
-        self.setup_stats_section()
+        # Дополнительные настройки
+        self.setup_advanced_settings()
         
     def setup_color_settings(self):
         """Настройка цветовых параметров"""
@@ -103,36 +103,59 @@ class TrackingPanel:
         self.val_high.insert(0, "255")
         self.val_high.pack(side="left", padx=2)
         
-    def setup_stats_section(self):
-        """Настройка раздела статистики"""
-        stats_frame = ctk.CTkFrame(self.main_frame, fg_color=COLORS["bg_light"])
-        stats_frame.pack(fill="x", pady=UI_SETTINGS["padding_small"])
+    def setup_advanced_settings(self):
+        """Настройка дополнительных параметров"""
+        advanced_frame = ctk.CTkFrame(self.main_frame, fg_color=COLORS["bg_light"])
+        advanced_frame.pack(fill="x", pady=UI_SETTINGS["padding_small"])
         
         # Заголовок
         section_label = ctk.CTkLabel(
-            stats_frame,
-            text="Статистика трекинга",
+            advanced_frame,
+            text="Дополнительные настройки",
             font=ctk.CTkFont(weight="bold"),
             text_color=COLORS["text"]
         )
         section_label.pack(anchor="w", pady=(0, UI_SETTINGS["padding_small"]))
         
-        # Показатели
-        self.stats_text = ctk.CTkTextbox(
-            stats_frame,
-            height=120,
-            fg_color=COLORS["bg_dark"],
-            text_color=COLORS["text_secondary"],
-            font=ctk.CTkFont(size=12)
+        # Переключатель использования вычитания фона
+        self.bg_subtract_switch = ctk.CTkSwitch(
+            advanced_frame,
+            text="Использовать вычитание фона",
+            variable=ctk.BooleanVar(value=True)
         )
-        self.stats_text.pack(fill="x", pady=UI_SETTINGS["padding_small"])
-        self.stats_text.insert("1.0", "Трекинг не активен\n\n")
-        self.stats_text.configure(state="disabled")
+        self.bg_subtract_switch.pack(fill="x", pady=2)
+        
+        # Поле для настройки скорости обучения
+        learning_rate_frame = ctk.CTkFrame(advanced_frame, fg_color="transparent")
+        learning_rate_frame.pack(fill="x", pady=2)
+        
+        ctk.CTkLabel(learning_rate_frame, text="Скорость обучения фона:", width=150).pack(side="left")
+        self.learning_rate_entry = ctk.CTkEntry(learning_rate_frame, width=60, placeholder_text="0.01")
+        self.learning_rate_entry.insert(0, "0.01")
+        self.learning_rate_entry.pack(side="left", padx=2)
+        
+        # Кнопка сброса модели фона
+        self.reset_bg_btn = ctk.CTkButton(
+            advanced_frame,
+            text="🔄 Сбросить модель фона",
+            command=self.reset_background_model,
+            height=UI_SETTINGS["button_height"],
+            fg_color=COLORS["secondary"],
+            hover_color=COLORS["primary"]
+        )
+        self.reset_bg_btn.pack(fill="x", pady=UI_SETTINGS["padding_small"])
+        
         
     def toggle_tracking(self):
         """Переключить состояние трекинга"""
         self.is_tracking = self.tracking_switch.get()
         self.toggle_tracking_callback(self.is_tracking)
+        
+    def reset_background_model(self):
+        """Сбросить модель фона"""
+        # Вызываем callback для сброса модели фона
+        if hasattr(self, 'reset_bg_callback'):
+            self.reset_bg_callback()
         
     def apply_settings(self):
         """Применить настройки трекинга"""
@@ -145,6 +168,17 @@ class TrackingPanel:
                 'value_low': int(self.val_low.get() or 100),
                 'value_high': int(self.val_high.get() or 255)
             }
+            
+            # Добавляем дополнительные настройки
+            bg_subtract_enabled = self.bg_subtract_switch.get()
+            try:
+                learning_rate = float(self.learning_rate_entry.get() or 0.01)
+            except ValueError:
+                learning_rate = 0.01
+                
+            settings['use_background_subtraction'] = bool(bg_subtract_enabled)
+            settings['background_learning_rate'] = learning_rate
+            
             self.apply_settings_callback(settings)
         except ValueError:
             # Callback должен обработать ошибку
@@ -164,28 +198,6 @@ class TrackingPanel:
         except ValueError:
             return {}
             
-    def update_stats(self, point_count: int, current_time: float, 
-                    current_position: tuple, current_velocity: float):
-        """Обновить статистику трекинга"""
-        try:
-            self.stats_text.configure(state="normal")
-            self.stats_text.delete("1.0", "end")
-            
-            stats_text = f"Точек: {point_count}\n"
-            if point_count > 0:
-                stats_text += f"Время: {current_time:.1f}с\n"
-                if current_position:
-                    stats_text += f"Позиция: ({current_position[0]}, {current_position[1]})\n"
-                stats_text += f"Скорость: {current_velocity:.1f} px/s"
-            else:
-                stats_text += "Трекинг не активен\n\n"
-            
-            self.stats_text.insert("1.0", stats_text)
-            self.stats_text.configure(state="disabled")
-            
-        except Exception as e:
-            print(f"Ошибка обновления статистики: {e}")
-            
     def set_tracking_state(self, is_tracking: bool):
         """Установить состояние трекинга"""
         self.is_tracking = is_tracking
@@ -193,10 +205,3 @@ class TrackingPanel:
             self.tracking_switch.select()
         else:
             self.tracking_switch.deselect()
-            
-    def clear_stats(self):
-        """Очистить статистику"""
-        self.stats_text.configure(state="normal")
-        self.stats_text.delete("1.0", "end")
-        self.stats_text.insert("1.0", "Трекинг не активен\n\n")
-        self.stats_text.configure(state="disabled")

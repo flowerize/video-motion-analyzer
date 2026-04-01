@@ -104,6 +104,8 @@ class MainWindow:
             self.toggle_tracking,
             self.apply_tracking_settings
         )
+        # Устанавливаем callback для сброса модели фона
+        self.tracking_panel.reset_bg_callback = self.reset_background_model
         
     def setup_video_area(self):
         """Настройка области отображения видео"""
@@ -205,13 +207,9 @@ class MainWindow:
             
             # Применяем трекинг если включен
             if self.is_tracking:
-                position = self.object_tracker.process_frame(frame)
-                if position:
-                    self.object_tracker.add_tracking_point(position, current_time)
-                    display_frame = self.object_tracker.draw_tracking_info(display_frame, position)
-                    
-                    # Обновляем статистику
-                    self.update_tracking_stats(position, current_time)
+                tracks = self.object_tracker.process_frame(frame, current_time)
+                if tracks:
+                    display_frame = self.object_tracker.draw_tracking_info(display_frame)
             
             # Обновляем отображение
             self.update_video_display(display_frame)
@@ -257,34 +255,6 @@ class MainWindow:
             print(f"Ошибка обновления видео: {e}")
 
             
-    def update_tracking_stats(self, position: tuple, current_time: float):
-        """Обновить статистику трекинга"""
-        data = self.object_tracker.get_tracking_data()
-        point_count = len(data)
-        current_velocity = self.calculate_current_velocity()
-        
-        self.tracking_panel.update_stats(point_count, current_time, position, current_velocity)
-        
-    def calculate_current_velocity(self) -> float:
-        """Вычислить текущую скорость"""
-        data = self.object_tracker.get_tracking_data()
-        if len(data) < 2:
-            return 0.0
-            
-        # Берем последние 2 точки
-        p1 = data[-2]
-        p2 = data[-1]
-        
-        dt = p2['timestamp'] - p1['timestamp']
-        if dt <= 0:
-            return 0.0
-            
-        dx = p2['x'] - p1['x']
-        dy = p2['y'] - p1['y']
-        distance = np.sqrt(dx**2 + dy**2)
-        
-        return distance / dt
-        
     # === ОСНОВНЫЕ МЕТОДЫ УПРАВЛЕНИЯ ===
     
     def open_video(self):
@@ -336,11 +306,25 @@ class MainWindow:
     def apply_tracking_settings(self, settings: dict):
         """Применить настройки трекинга"""
         if settings:
-            self.object_tracker.update_settings(settings)
+            # Обновляем обычные настройки
+            basic_settings = {k: v for k, v in settings.items() if k not in ['use_background_subtraction', 'background_learning_rate']}
+            self.object_tracker.update_settings(basic_settings)
+            
+            # Обновляем специальные настройки
+            if 'use_background_subtraction' in settings:
+                self.object_tracker.set_use_background_subtraction(settings['use_background_subtraction'])
+            if 'background_learning_rate' in settings:
+                self.object_tracker.set_background_learning_rate(settings['background_learning_rate'])
+                
             self.update_status("Настройки трекинга применены")
         else:
             self.update_status("Ошибка: проверьте значения настроек", is_error=True)
             
+    def reset_background_model(self):
+        """Сбросить модель фона"""
+        self.object_tracker.reset_background_model()
+        self.update_status("Модель фона сброшена")
+        
     def start_analysis(self):
         """Начать анализ движения"""
         tracking_data = self.object_tracker.get_tracking_data()
@@ -442,7 +426,6 @@ class MainWindow:
         self.video_label.configure(image="", text="Загрузите видео для начала анализа")
         self.video_controls.disable_controls()
         self.tracking_panel.set_tracking_state(False)
-        self.tracking_panel.clear_stats()
         self.analyze_btn.configure(state="disabled")
         self.export_btn.configure(state="disabled")
         self.tracking_status_label.configure(text="Трекинг: выключен")
