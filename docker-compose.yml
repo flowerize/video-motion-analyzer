@@ -1,0 +1,17 @@
+version: "3.9"
+
+services:
+  video-motion-analyzer:
+    build: .
+    container_name: video-motion-analyzer
+    volumes:
+      # X11 socket for GUI (macOS requires XQuartz)
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # Mount project for hot reload
+      - .:/app
+    environment:
+      # host.docker.internal = host machine from inside container
+      - DISPLAY=host.docker.internal:0
+    stdin_open: true
+    tty: true
+    ipc: host
