@@ -1,451 +1,577 @@
 """
-Главное окно приложения
+Главное окно приложения — PyQt6
 """
-import customtkinter as ctk
-import tkinter as tk
-from typing import Optional, Callable
-import cv2
-from PIL import Image, ImageTk
-import numpy as np
+import logging
+import sys
+import os
 import time
-from tkinter import filedialog
+from typing import Optional
 
-from utils.constants import COLORS, UI_SETTINGS, APP_SETTINGS
-from utils.file_handlers import FileHandler
+import cv2
+import numpy as np
+from PIL import Image
+
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QCheckBox, QSpinBox, QDoubleSpinBox,
+    QSplitter, QFrame, QSlider, QTabWidget, QTextEdit, QMessageBox,
+    QFileDialog, QProgressBar, QGroupBox, QFormLayout, QGridLayout,
+    QSizePolicy
+)
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread
+from PyQt6.QtGui import QImage, QPixmap, QFont, QColor
+
+# Core modules
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 from core.video_processor import VideoProcessor
 from core.object_tracker import ObjectTracker
 from core.data_analyzer import DataAnalyzer
-from gui.video_controls import VideoControls
-from gui.tracking_panel import TrackingPanel
-from gui.results_panel import ResultsPanel
+from utils.config_manager import ConfigManager
+
+logger = logging.getLogger(__name__)
 
 
-class MainWindow:
-    """Главное окно приложения"""
-    
-    def __init__(self, parent):
-        self.parent = parent
+class VideoWorker(QThread):
+    """Фоновый поток для воспроизведения видео"""
+    frame_ready = pyqtSignal(np.ndarray)
+    finished = pyqtSignal()
+
+    def __init__(self, processor: VideoProcessor):
+        super().__init__()
+        self.processor = processor
+        self._running = False
+
+    def run(self):
+        self._running = True
+        while self._running and self.processor.is_opened():
+            ret, frame = self.processor.cap.read()
+            if not ret:
+                break
+            self.frame_ready.emit(frame)
+            # Sleep to match FPS
+            fps = self.processor.cap.get(cv2.CAP_PROP_FPS)
+            if fps > 0:
+                delay = int((1.0 / fps) * 1000)
+                self.msleep(delay)
+        self.finished.emit()
+
+    def stop(self):
+        self._running = False
+        self.quit()
+        self.wait()
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Video Motion Analyzer")
+        self.resize(1200, 800)
+
+        self.config = ConfigManager()
         self.video_processor = VideoProcessor()
         self.object_tracker = ObjectTracker()
         self.data_analyzer = DataAnalyzer()
-        
+
         self.current_video_path = None
         self.is_playing = False
         self.is_tracking = False
-        self.video_frame = None
-        self.start_time = 0
-        
-        self.setup_ui()
-        self.setup_bindings()
-        
-    def setup_ui(self):
-        """Настройка пользовательского интерфейса"""
-        self.setup_main_frames()
-        self.setup_sidebar()
-        self.setup_video_area()
-        self.setup_control_panel()
-        self.setup_status_bar()
-        self.setup_results_panel()
-        
-    def setup_main_frames(self):
-        """Настройка основных фреймов"""
-        # Главный контейнер
-        self.main_container = ctk.CTkFrame(self.parent, fg_color=COLORS["bg_dark"])
-        self.main_container.pack(fill="both", expand=True, padx=0, pady=0)
-        
-        # Боковая панель
-        self.sidebar_frame = ctk.CTkFrame(
-            self.main_container, 
-            width=300,
-            fg_color=COLORS["bg_light"],
-            corner_radius=0
+        self.start_time = 0.0
+
+        # Video display cache
+        self._last_img_size = None
+        self._cached_pixmap = None
+
+        # Worker thread
+        self.worker = VideoWorker(self.video_processor)
+        self.worker.frame_ready.connect(self._on_frame_ready)
+        self.worker.finished.connect(self._on_playback_finished)
+
+        self._setup_ui()
+        self._load_saved_settings()
+
+    # ======================== UI ========================
+
+    def _setup_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QHBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # Splitter: sidebar | content
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # --- Sidebar ---
+        sidebar = QWidget()
+        sidebar.setFixedWidth(320)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(10, 10, 10, 10)
+        sidebar_layout.setSpacing(10)
+
+        # Title
+        title = QLabel("Video Motion\nAnalyzer")
+        title.setFont(QFont("Helvetica", 18, QFont.Weight.Bold))
+        title.setStyleSheet("color: #4a9eff;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sidebar_layout.addWidget(title)
+
+        # Open video button
+        self.open_btn = QPushButton("📁 Открыть видео")
+        self.open_btn.clicked.connect(self.open_video)
+        self.open_btn.setMinimumHeight(40)
+        sidebar_layout.addWidget(self.open_btn)
+
+        # Video info
+        self.video_info = QLabel("Видео не загружено")
+        self.video_info.setStyleSheet("color: gray;")
+        self.video_info.setWordWrap(True)
+        sidebar_layout.addWidget(self.video_info)
+
+        # Play/Pause buttons
+        btn_row = QHBoxLayout()
+        self.play_btn = QPushButton("▶ Воспроизвести")
+        self.play_btn.setEnabled(False)
+        self.play_btn.clicked.connect(self.play_video)
+        self.pause_btn = QPushButton("⏸ Пауза")
+        self.pause_btn.setEnabled(False)
+        self.pause_btn.clicked.connect(self.pause_video)
+        btn_row.addWidget(self.play_btn)
+        btn_row.addWidget(self.pause_btn)
+        sidebar_layout.addLayout(btn_row)
+
+        # Reset button
+        reset_btn = QPushButton("🔄 Сброс")
+        reset_btn.clicked.connect(self.reset_analysis)
+        sidebar_layout.addWidget(reset_btn)
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        sidebar_layout.addWidget(separator)
+
+        # Tracking settings group
+        tracking_group = QGroupBox("Настройки трекинга")
+        tracking_layout = QFormLayout(tracking_group)
+
+        self.track_check = QCheckBox("Включить трекинг")
+        self.track_check.stateChanged.connect(self.toggle_tracking)
+        tracking_layout.addRow(self.track_check)
+
+        # HSV
+        hsv_layout = QGridLayout()
+        self.hue_low_spin = QSpinBox(); self.hue_low_spin.setRange(0, 180); self.hue_low_spin.setValue(0)
+        self.hue_high_spin = QSpinBox(); self.hue_high_spin.setRange(0, 180); self.hue_high_spin.setValue(180)
+        self.sat_low_spin = QSpinBox(); self.sat_low_spin.setRange(0, 255); self.sat_low_spin.setValue(50)
+        self.sat_high_spin = QSpinBox(); self.sat_high_spin.setRange(0, 255); self.sat_high_spin.setValue(255)
+        self.val_low_spin = QSpinBox(); self.val_low_spin.setRange(0, 255); self.val_low_spin.setValue(50)
+        self.val_high_spin = QSpinBox(); self.val_high_spin.setRange(0, 255); self.val_high_spin.setValue(255)
+
+        hsv_layout.addWidget(QLabel("Hue:"), 0, 0)
+        hsv_layout.addWidget(self.hue_low_spin, 0, 1)
+        hsv_layout.addWidget(QLabel("-"), 0, 2)
+        hsv_layout.addWidget(self.hue_high_spin, 0, 3)
+        hsv_layout.addWidget(QLabel("Sat:"), 1, 0)
+        hsv_layout.addWidget(self.sat_low_spin, 1, 1)
+        hsv_layout.addWidget(QLabel("-"), 1, 2)
+        hsv_layout.addWidget(self.sat_high_spin, 1, 3)
+        hsv_layout.addWidget(QLabel("Val:"), 2, 0)
+        hsv_layout.addWidget(self.val_low_spin, 2, 1)
+        hsv_layout.addWidget(QLabel("-"), 2, 2)
+        hsv_layout.addWidget(self.val_high_spin, 2, 3)
+        tracking_layout.addRow(hsv_layout)
+
+        apply_btn = QPushButton("Применить настройки")
+        apply_btn.clicked.connect(self.apply_tracking_settings)
+        tracking_layout.addRow(apply_btn)
+
+        sidebar_layout.addWidget(tracking_group)
+
+        # Advanced settings
+        adv_group = QGroupBox("Дополнительно")
+        adv_layout = QFormLayout(adv_group)
+
+        self.bg_check = QCheckBox("Вычитание фона")
+        self.bg_check.setChecked(True)
+        adv_layout.addRow(self.bg_check)
+
+        self.lr_spin = QDoubleSpinBox()
+        self.lr_spin.setRange(0.001, 1.0)
+        self.lr_spin.setValue(0.01)
+        self.lr_spin.setSingleStep(0.001)
+        adv_layout.addRow("Скорость обучения:", self.lr_spin)
+
+        reset_bg_btn = QPushButton("🔄 Сбросить модель фона")
+        reset_bg_btn.clicked.connect(self.reset_background_model)
+        adv_layout.addRow(reset_bg_btn)
+
+        sidebar_layout.addWidget(adv_group)
+        sidebar_layout.addStretch()
+
+        splitter.addWidget(sidebar)
+
+        # --- Content area ---
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(10, 10, 10, 10)
+
+        # Video display
+        self.video_label = QLabel("Загрузите видео для начала анализа")
+        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_label.setStyleSheet(
+            "background-color: #1a1a1a; color: gray; border: 1px solid #333;"
         )
-        self.sidebar_frame.pack(side="left", fill="y", padx=0, pady=0)
-        self.sidebar_frame.pack_propagate(False)
-        
-        # Основная область контента
-        self.content_frame = ctk.CTkFrame(
-            self.main_container,
-            fg_color=COLORS["bg_dark"]
+        self.video_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        self.content_frame.pack(side="right", fill="both", expand=True, padx=0, pady=0)
-        
-    def setup_sidebar(self):
-        """Настройка боковой панели"""
-        # Заголовок
-        title_label = ctk.CTkLabel(
-            self.sidebar_frame,
-            text="Video Motion\nAnalyzer",
-            font=ctk.CTkFont(size=20, weight="bold"),
-            text_color=COLORS["text"]
-        )
-        title_label.pack(pady=UI_SETTINGS["padding_large"])
-        
-        # Разделитель
-        separator = ctk.CTkFrame(
-            self.sidebar_frame,
-            height=2,
-            fg_color=COLORS["primary"]
-        )
-        separator.pack(fill="x", padx=UI_SETTINGS["padding_medium"], pady=UI_SETTINGS["padding_small"])
-        
-        # Панель управления видео
-        self.video_controls = VideoControls(
-            self.sidebar_frame,
-            self.open_video,
-            self.play_video,
-            self.pause_video,
-            self.reset_analysis
-        )
-        
-        # Панель настроек трекинга
-        self.tracking_panel = TrackingPanel(
-            self.sidebar_frame,
-            self.toggle_tracking,
-            self.apply_tracking_settings
-        )
-        # Устанавливаем callback для сброса модели фона
-        self.tracking_panel.reset_bg_callback = self.reset_background_model
-        
-    def setup_video_area(self):
-        """Настройка области отображения видео"""
-        self.video_container = ctk.CTkFrame(self.content_frame, fg_color=COLORS["bg_dark"])
-        self.video_container.pack(fill="both", expand=True, padx=UI_SETTINGS["padding_medium"], 
-                                pady=UI_SETTINGS["padding_medium"])
-        
-        self.video_container.pack_propagate(False)  # Важно: контейнер не будет сжиматься под контент
-        self.video_container.grid_propagate(False)  # Актуально, если внутри grid
-        
-        # Метка для отображения видео
-        self.video_label = ctk.CTkLabel(
-            self.video_container,
-            text="Загрузите видео для начала анализа",
-            font=ctk.CTkFont(size=16),
-            text_color=COLORS["text_secondary"],
-            fg_color=COLORS["bg_light"],
-            corner_radius=UI_SETTINGS["corner_radius"]
-        )
-        self.video_label.pack(fill="both", expand=True, padx=0, pady=0)
-        
-    def setup_control_panel(self):
-        """Настройка панели управления"""
-        self.control_panel = ctk.CTkFrame(self.content_frame, fg_color=COLORS["bg_light"])
-        self.control_panel.pack(fill="x", padx=UI_SETTINGS["padding_medium"], 
-                              pady=(0, UI_SETTINGS["padding_medium"]))
-        
-        # Прогресс-бар
-        self.progress_bar = ctk.CTkProgressBar(self.control_panel, height=8)
-        self.progress_bar.pack(fill="x", padx=UI_SETTINGS["padding_medium"], 
-                             pady=UI_SETTINGS["padding_small"])
-        self.progress_bar.set(0)
-        
-        # Кнопки анализа
-        btn_frame = ctk.CTkFrame(self.control_panel, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=UI_SETTINGS["padding_medium"], 
-                     pady=UI_SETTINGS["padding_small"])
-        
-        self.analyze_btn = ctk.CTkButton(
-            btn_frame,
-            text="🎯 Анализ и графики",
-            command=self.start_analysis,
-            height=UI_SETTINGS["button_height"],
-            state="disabled",
-            fg_color=COLORS["accent"],
-            hover_color="#268955"
-        )
-        self.analyze_btn.pack(side="left", padx=(0, 5))
-        
-        self.export_btn = ctk.CTkButton(
-            btn_frame,
-            text="📊 Экспорт данных",
-            command=self.export_data,
-            height=UI_SETTINGS["button_height"],
-            state="disabled",
-            fg_color=COLORS["primary"],
-            hover_color=COLORS["secondary"]
-        )
-        self.export_btn.pack(side="left", padx=5)
-        
-    def setup_results_panel(self):
-        """Настройка панели результатов (изначально скрыта)"""
-        self.results_frame = ctk.CTkFrame(self.content_frame, fg_color=COLORS["bg_dark"])
-        # Изначально скрыта, показывается по нажатию кнопки анализа
-        
-        self.results_panel = ResultsPanel(self.results_frame)
-        
-    def setup_status_bar(self):
-        """Настройка строки состояния"""
-        self.status_frame = ctk.CTkFrame(self.main_container, height=30, corner_radius=0)
-        self.status_frame.pack(side="bottom", fill="x", padx=0, pady=0)
-        self.status_frame.pack_propagate(False)
-        
-        self.status_label = ctk.CTkLabel(
-            self.status_frame,
-            text="Готов к работе",
-            text_color=COLORS["text_secondary"]
-        )
-        self.status_label.pack(side="left", padx=UI_SETTINGS["padding_medium"])
-        
-        # Информация о трекинге
-        self.tracking_status_label = ctk.CTkLabel(
-            self.status_frame,
-            text="Трекинг: выключен",
-            text_color=COLORS["text_secondary"]
-        )
-        self.tracking_status_label.pack(side="right", padx=UI_SETTINGS["padding_medium"])
-        
-    def setup_bindings(self):
-        """Настройка привязок событий"""
-        # Регистрируем callback для обновления видео
-        self.video_processor.add_frame_callback(self.process_video_frame)
-        
-    def process_video_frame(self, frame: np.ndarray):
-        """Обработать кадр видео с трекингом"""
+        content_layout.addWidget(self.video_label)
+
+        # Progress bar
+        self.progress = QProgressBar()
+        self.progress.setMaximumHeight(8)
+        content_layout.addWidget(self.progress)
+
+        # Action buttons
+        act_row = QHBoxLayout()
+        self.analyze_btn = QPushButton("🎯 Анализ и графики")
+        self.analyze_btn.setEnabled(False)
+        self.analyze_btn.clicked.connect(self.start_analysis)
+        self.export_btn = QPushButton("📊 Экспорт данных")
+        self.export_btn.setEnabled(False)
+        self.export_btn.clicked.connect(self.export_data)
+        act_row.addWidget(self.analyze_btn)
+        act_row.addWidget(self.export_btn)
+        content_layout.addLayout(act_row)
+
+        # Results panel (hidden initially)
+        self.results_tabs = QTabWidget()
+        self.results_tabs.setVisible(False)
+        content_layout.addWidget(self.results_tabs)
+
+        # Add placeholder tabs
+        for name in ("Траектория", "Скорость", "Ускорение", "Статистика"):
+            self.results_tabs.addTab(QWidget(), name)
+
+        self.back_btn = QPushButton("← Назад к видео")
+        self.back_btn.setVisible(False)
+        self.back_btn.clicked.connect(self._show_video)
+        content_layout.addWidget(self.back_btn)
+
+        splitter.addWidget(content)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+
+        main_layout.addWidget(splitter)
+
+        # Status bar
+        self.statusBar().showMessage("Готов к работе")
+        self.tracking_status_lbl = QLabel("Трекинг: выкл")
+        self.statusBar().addPermanentWidget(self.tracking_status_lbl)
+
+    # ======================== VIDEO DISPLAY ========================
+
+    def _numpy_to_qimage(self, frame: np.ndarray) -> QImage:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        bytes_per_line = ch * w
+        return QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+
+    def _update_video_display(self, frame: np.ndarray):
         try:
-            display_frame = frame.copy()
-            current_time = time.time() - self.start_time
-            
-            # Применяем трекинг если включен
+            qimg = self._numpy_to_qimage(frame)
+            pixmap = QPixmap.fromImage(qimg)
+
+            # Scale to fit label
+            available = self.video_label.size()
+            if available.width() < 10 or available.height() < 10:
+                return
+
+            scaled = pixmap.scaled(
+                available.width() - 4, available.height() - 4,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+
+            self.video_label.setPixmap(scaled)
+        except Exception as e:
+            logger.error(f"Ошибка обновления видео: {e}")
+
+    # ======================== EVENTS ========================
+
+    def _on_frame_ready(self, frame: np.ndarray):
+        """Получен кадр из потока воспроизведения"""
+        try:
+            display = frame.copy()
+            t = time.time() - self.start_time
+
             if self.is_tracking:
-                tracks = self.object_tracker.process_frame(frame, current_time)
+                tracks = self.object_tracker.process_frame(frame, t)
                 if tracks:
-                    display_frame = self.object_tracker.draw_tracking_info(display_frame)
-            
-            # Обновляем отображение
-            self.update_video_display(display_frame)
-            
-            # Обновляем прогресс
+                    display = self.object_tracker.draw_tracking_info(display)
+
+            # Update via event loop (thread-safe)
+            self._update_video_display(display)
+
+            # Progress
             if self.video_processor.is_opened():
-                current_frame = self.video_processor.get_current_frame_number()
-                total_frames = self.video_processor.get_total_frames()
-                if total_frames > 0:
-                    progress = current_frame / total_frames
-                    self.progress_bar.set(progress)
-                    
+                cur = int(self.video_processor.cap.get(cv2.CAP_PROP_POS_FRAMES))
+                tot = int(self.video_processor.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                if tot > 0:
+                    self.progress.setValue(int((cur / tot) * 100))
         except Exception as e:
-            print(f"Ошибка обработки видео: {e}")
-            
-    def update_video_display(self, frame: np.ndarray):
-        """Обновить отображение видео в интерфейсе"""
-        try:
-            # Конвертируем BGR в RGB
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # Конвертируем в PIL
-            img = Image.fromarray(rgb_frame)
-            
-            # === Получаем размеры контейнера, а не метки (метка может быть ещё не готова) ===
-            container_width = self.video_container.winfo_width() - 4  # с учётом padx
-            container_height = self.video_container.winfo_height() - 4
-            
-            # Убедимся, что размеры валидны
-            if container_width < 10 or container_height < 10:
-                container_width, container_height = 640, 480  # fallback
+            logger.error(f"Ошибка обработки кадра: {e}")
 
-            # Масштабируем с сохранением пропорций (опционально)
-            img = img.resize((container_width, container_height), Image.Resampling.LANCZOS)
-            
-            ctk_image = ctk.CTkImage(light_image=img, dark_image=img, size=(container_width, container_height))
-            self.video_label.configure(image=ctk_image, text="")
-            
-            # Сохраняем ссылку, чтобы избежать уничтожения garbage collector'ом
-            self.current_video_image = ctk_image
-            
-        except Exception as e:
-            print(f"Ошибка обновления видео: {e}")
+    def _on_playback_finished(self):
+        self.is_playing = False
+        self.play_btn.setEnabled(True)
+        self.pause_btn.setEnabled(False)
+        self.statusBar().showMessage("Воспроизведение завершено")
 
-            
-    # === ОСНОВНЫЕ МЕТОДЫ УПРАВЛЕНИЯ ===
-    
+    def resizeEvent(self, event):
+        """Пересчёт при изменении размера окна"""
+        self._last_img_size = None  # сброс кэша
+        super().resizeEvent(event)
+
+    # ======================== ACTIONS ========================
+
     def open_video(self):
-        """Открыть видео файл"""
-        file_path = FileHandler.open_video_file()
-        if file_path:
-            self.current_video_path = file_path
-            if self.video_processor.open_video(file_path):
-                self.video_controls.update_video_info(file_path)
-                self.video_controls.enable_controls()
-                self.analyze_btn.configure(state="normal")
-                self.export_btn.configure(state="normal")
-                self.update_status(f"Видео загружено: {file_path}")
-            else:
-                self.update_status("Ошибка загрузки видео", is_error=True)
-                
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Выберите видео файл", "",
+            "Video (*.mp4 *.avi *.mov *.mkv *.wmv);;All (*)"
+        )
+        if not path:
+            return
+
+        self.current_video_path = path
+        try:
+            self.config.add_recent_file(path)
+        except Exception:
+            pass
+
+        if self.video_processor.open_video(path):
+            props = self.video_processor.cap
+            fps = props.get(cv2.CAP_PROP_FPS)
+            w = int(props.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(props.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fc = int(props.get(cv2.CAP_PROP_FRAME_COUNT))
+            dur = fc / fps if fps > 0 else 0
+            self.video_info.setText(
+                f"{path}\n{w}x{h}, {fps:.1f} FPS, {fc} кадров, {dur:.1f}с"
+            )
+            self.play_btn.setEnabled(True)
+            self.pause_btn.setEnabled(True)
+            self.analyze_btn.setEnabled(True)
+            self.export_btn.setEnabled(True)
+            self.statusBar().showMessage(f"Видео загружено: {path}")
+        else:
+            self.statusBar().showMessage("Ошибка загрузки видео", 3000)
+            self.statusBar().currentWidget().setStyleSheet("color: red;")
+
     def play_video(self):
-        """Воспроизвести видео"""
-        if self.video_processor.is_opened():
-            self.video_processor.start_playback()
-            self.is_playing = True
-            self.video_controls.set_playing_state(True)
-            self.update_status("Воспроизведение видео")
-            
+        if not self.video_processor.is_opened():
+            return
+        self.video_processor.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        self.worker.start()
+        self.is_playing = True
+        self.play_btn.setEnabled(False)
+        self.pause_btn.setEnabled(True)
+        self.statusBar().showMessage("Воспроизведение")
+
     def pause_video(self):
-        """Приостановить видео"""
-        if self.video_processor.is_playing():
-            self.video_processor.stop_playback()
+        if self.is_playing:
+            self.worker.stop()
             self.is_playing = False
-            self.video_controls.set_playing_state(False)
-            self.update_status("Видео приостановлено")
-            
-    def toggle_tracking(self, is_tracking: bool):
-        """Включить/выключить трекинг"""
-        self.is_tracking = is_tracking
-        
+            self.play_btn.setEnabled(True)
+            self.pause_btn.setEnabled(False)
+            self.statusBar().showMessage("Пауза")
+
+    def toggle_tracking(self, state):
+        self.is_tracking = state == Qt.CheckState.Checked.value
         if self.is_tracking:
             self.object_tracker.start_tracking()
             self.start_time = time.time()
-            self.tracking_status_label.configure(text="Трекинг: включен", 
-                                               text_color=COLORS["success"])
-            self.update_status("Трекинг активирован")
+            self.tracking_status_lbl.setText("Трекинг: вкл")
+            self.tracking_status_lbl.setStyleSheet("color: green;")
+            self.statusBar().showMessage("Трекинг активирован")
         else:
             self.object_tracker.stop_tracking()
-            self.tracking_status_label.configure(text="Трекинг: выключен",
-                                               text_color=COLORS["text_secondary"])
-            self.update_status("Трекинг остановлен")
-            
-    def apply_tracking_settings(self, settings: dict):
-        """Применить настройки трекинга"""
-        if settings:
-            # Обновляем обычные настройки
-            basic_settings = {k: v for k, v in settings.items() if k not in ['use_background_subtraction', 'background_learning_rate']}
-            self.object_tracker.update_settings(basic_settings)
-            
-            # Обновляем специальные настройки
-            if 'use_background_subtraction' in settings:
-                self.object_tracker.set_use_background_subtraction(settings['use_background_subtraction'])
-            if 'background_learning_rate' in settings:
-                self.object_tracker.set_background_learning_rate(settings['background_learning_rate'])
-                
-            self.update_status("Настройки трекинга применены")
-        else:
-            self.update_status("Ошибка: проверьте значения настроек", is_error=True)
-            
-    def reset_background_model(self):
-        """Сбросить модель фона"""
-        self.object_tracker.reset_background_model()
-        self.update_status("Модель фона сброшена")
-        
-    def start_analysis(self):
-        """Начать анализ движения"""
-        tracking_data = self.object_tracker.get_tracking_data()
-        if not tracking_data:
-            self.update_status("Нет данных для анализа", is_error=True)
-            return
-            
-        self.update_status("Анализ движения начат")
-        
-        # Загружаем данные в анализатор
-        self.data_analyzer.load_data(tracking_data)
-        results = self.data_analyzer.analyze_movement()
-        
-        # Показываем панель результатов
-        self.show_results_panel()
-        
-        # Обновляем графики
-        self.results_panel.update_plots(tracking_data)
-        
-        self.update_status(f"Анализ завершен: {len(tracking_data)} точек")
-        
-    def show_results_panel(self):
-        """Показать панель результатов"""
-        # Скрываем видео панель
-        self.video_container.pack_forget()
-        self.control_panel.pack_forget()
-        
-        # Показываем панель результатов
-        self.results_frame.pack(fill="both", expand=True, padx=UI_SETTINGS["padding_medium"], 
-                              pady=UI_SETTINGS["padding_medium"])
-        
-        # Добавляем кнопку возврата к видео
-        self.add_back_to_video_button()
-        
-    def add_back_to_video_button(self):
-        """Добавить кнопку возврата к видео"""
-        if hasattr(self, 'back_btn'):
-            return
-            
-        back_frame = ctk.CTkFrame(self.content_frame, fg_color=COLORS["bg_light"])
-        back_frame.pack(fill="x", padx=UI_SETTINGS["padding_medium"], 
-                       pady=(0, UI_SETTINGS["padding_medium"]))
-        
-        self.back_btn = ctk.CTkButton(
-            back_frame,
-            text="← Назад к видео",
-            command=self.show_video_panel,
-            height=UI_SETTINGS["button_height"],
-            fg_color=COLORS["primary"],
-            hover_color=COLORS["secondary"]
-        )
-        self.back_btn.pack(side="left", padx=5, pady=5)
-        
-    def show_video_panel(self):
-        """Показать панель видео"""
-        # Скрываем панель результатов
-        self.results_frame.pack_forget()
-        if hasattr(self, 'back_btn'):
-            self.back_btn.master.pack_forget()
-            delattr(self, 'back_btn')
-        
-        # Показываем видео панель
-        self.video_container.pack(fill="both", expand=True, padx=UI_SETTINGS["padding_medium"], 
-                                pady=UI_SETTINGS["padding_medium"])
-        self.control_panel.pack(fill="x", padx=UI_SETTINGS["padding_medium"], 
-                              pady=(0, UI_SETTINGS["padding_medium"]))
-        
-    def export_data(self):
-        """Экспорт данных анализа"""
+            self.tracking_status_lbl.setText("Трекинг: выкл")
+            self.tracking_status_lbl.setStyleSheet("")
+            self.statusBar().showMessage("Трекинг остановлен")
+
+    def apply_tracking_settings(self):
+        settings = {
+            'hue_low': self.hue_low_spin.value(),
+            'hue_high': self.hue_high_spin.value(),
+            'saturation_low': self.sat_low_spin.value(),
+            'saturation_high': self.sat_high_spin.value(),
+            'value_low': self.val_low_spin.value(),
+            'value_high': self.val_high_spin.value(),
+            'use_background_subtraction': self.bg_check.isChecked(),
+            'background_learning_rate': self.lr_spin.value(),
+        }
+        self.object_tracker.update_settings({
+            k: v for k, v in settings.items()
+            if k not in ('use_background_subtraction', 'background_learning_rate')
+        })
+        self.object_tracker.set_use_background_subtraction(settings['use_background_subtraction'])
+        self.object_tracker.set_background_learning_rate(settings['background_learning_rate'])
+
         try:
-            # Экспорт сырых данных
-            raw_file = filedialog.asksaveasfilename(
-                defaultextension=".json",
-                filetypes=[("JSON files", "*.json")]
-            )
-            if raw_file and self.object_tracker.export_data(raw_file):
-                self.update_status(f"Данные экспортированы в {raw_file}")
-                
-            # Экспорт анализа
-            analysis_file = filedialog.asksaveasfilename(
-                defaultextension=".csv",
-                filetypes=[("CSV files", "*.csv")]
-            )
-            if analysis_file and self.data_analyzer.export_analysis_csv(analysis_file):
-                self.update_status(f"Анализ экспортирован в {analysis_file}")
-                
-        except Exception as e:
-            self.update_status(f"Ошибка экспорта: {str(e)}", is_error=True)
-        
+            self.config.set_tracking_settings(settings)
+        except Exception:
+            pass
+
+        self.statusBar().showMessage("Настройки применены")
+
+    def reset_background_model(self):
+        self.object_tracker.reset_background_model()
+        self.statusBar().showMessage("Модель фона сброшена")
+
+    def start_analysis(self):
+        data = self.object_tracker.get_tracking_data()
+        if not data:
+            QMessageBox.warning(self, "Нет данных", "Нет данных для анализа. Включите трекинг и воспроизведите видео.")
+            return
+
+        self.data_analyzer.load_data(data)
+        self.data_analyzer.analyze_movement()
+
+        # Hide video, show results
+        self.video_label.setVisible(False)
+        self.progress.setVisible(False)
+        self.back_btn.setVisible(True)
+        self.results_tabs.setVisible(True)
+
+        # Plot trajectory
+        fig = self.data_analyzer.create_trajectory_plot()
+        self._embed_plot(fig, 0)
+        plt.close(fig)
+
+        # Plot velocity
+        fig = self.data_analyzer.create_velocity_plot()
+        self._embed_plot(fig, 1)
+        plt.close(fig)
+
+        # Plot acceleration
+        fig = self.data_analyzer.create_acceleration_plot()
+        if fig:
+            self._embed_plot(fig, 2)
+            plt.close(fig)
+
+        # Stats
+        self._update_stats(self.data_analyzer.analysis_results)
+
+        self.statusBar().showMessage(f"Анализ: {len(data)} точек")
+
+    def _embed_plot(self, fig, tab_index: int):
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+        canvas = FigureCanvasQTAgg(fig)
+        canvas.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        canvas.draw()
+        self.results_tabs.widget(tab_index).setLayout(QVBoxLayout())
+        self.results_tabs.widget(tab_index).layout().addWidget(canvas)
+
+    def _update_stats(self, results: dict):
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+
+        lines = [
+            "=== СТАТИСТИКА АНАЛИЗА ===",
+            f"Общее время: {results['total_time']:.2f} с",
+            f"Общее расстояние: {results['total_distance']:.2f} px",
+            f"Макс. скорость: {results['max_velocity']:.2f} px/с",
+            f"Макс. ускорение: {results['max_acceleration']:.2f} px/с²",
+            f"Средняя скорость: {results['avg_velocity']:.2f} px/с",
+            f"Количество точек: {len(self.data_analyzer.data)}",
+        ]
+
+        tids = [p.get('track_id') for p in self.data_analyzer.data if p.get('track_id')]
+        unique = len(set(tids))
+        lines.append(f"Количество треков: {unique}")
+
+        if unique:
+            lines.append("\n=== ДЕТАЛИ ТРЕКИНГА ===")
+            latest = {}
+            for p in self.data_analyzer.data:
+                tid = p.get('track_id')
+                if tid is not None:
+                    latest[tid] = p
+            recent = sorted(latest.values(), key=lambda p: p['timestamp'], reverse=True)
+            for p in recent[:5]:
+                lines.append(f"  ID {p['track_id']}: ({p['x']}, {p['y']}) v={p.get('velocity', 0):.1f} px/с")
+            if len(recent) > 5:
+                lines.append(f"  ... и ещё {len(recent) - 5} треков")
+
+        text_edit.setPlainText("\n".join(lines))
+        self.results_tabs.widget(3).setLayout(QVBoxLayout())
+        self.results_tabs.widget(3).layout().addWidget(text_edit)
+
+    def _show_video(self):
+        self.results_tabs.setVisible(False)
+        self.back_btn.setVisible(False)
+        self.video_label.setVisible(True)
+        self.progress.setVisible(True)
+        # Clear plots
+        for i in range(4):
+            widget = self.results_tabs.widget(i)
+            layout = widget.layout()
+            if layout:
+                while layout.count():
+                    child = layout.takeAt(0)
+                    if child.widget():
+                        child.widget().deleteLater()
+                widget.setLayout(None)
+
+    def export_data(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить данные", "", "JSON (*.json)"
+        )
+        if path and self.object_tracker.export_data(path):
+            self.statusBar().showMessage(f"Экспортировано: {path}")
+
+        path2, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить анализ", "", "CSV (*.csv)"
+        )
+        if path2 and self.data_analyzer.export_analysis_csv(path2):
+            self.statusBar().showMessage(f"Анализ экспортирован: {path2}")
+
     def reset_analysis(self):
-        """Сбросить анализ"""
         self.video_processor.close_video()
         self.object_tracker.clear_tracking_data()
         self.current_video_path = None
         self.is_playing = False
         self.is_tracking = False
-        
-        # Сброс интерфейса
-        self.video_label.configure(image="", text="Загрузите видео для начала анализа")
-        self.video_controls.disable_controls()
-        self.tracking_panel.set_tracking_state(False)
-        self.analyze_btn.configure(state="disabled")
-        self.export_btn.configure(state="disabled")
-        self.tracking_status_label.configure(text="Трекинг: выключен")
-        self.progress_bar.set(0)
-        
-        # Очищаем графики
-        self.results_panel.clear_plots()
-        
-        # Возвращаемся к видео панели
-        if hasattr(self, 'back_btn'):
-            self.show_video_panel()
-        
-        self.update_status("Готов к работе")
-        
-    def update_status(self, message: str, is_error: bool = False):
-        """Обновить статус"""
-        color = COLORS["error"] if is_error else COLORS["text_secondary"]
-        self.status_label.configure(text=message, text_color=color)
-        
-    def on_closing(self):
-        """Обработка закрытия приложения"""
+
+        self.video_label.setText("Загрузите видео для начала анализа")
+        self.video_label.setPixmap(None)
+        self.video_info.setText("Видео не загружено")
+        self.play_btn.setEnabled(False)
+        self.pause_btn.setEnabled(False)
+        self.analyze_btn.setEnabled(False)
+        self.export_btn.setEnabled(False)
+        self.progress.setValue(0)
+        self.track_check.setChecked(False)
+        self.tracking_status_lbl.setText("Трекинг: выкл")
+
+        self._show_video()
+        self.statusBar().showMessage("Готов к работе")
+
+    def _load_saved_settings(self):
+        try:
+            t = self.config.get_tracking_settings()
+            self.hue_low_spin.setValue(t.get('hue_low', 0))
+            self.hue_high_spin.setValue(t.get('hue_high', 180))
+            self.sat_low_spin.setValue(t.get('saturation_low', 50))
+            self.sat_high_spin.setValue(t.get('saturation_high', 255))
+            self.val_low_spin.setValue(t.get('value_low', 50))
+            self.val_high_spin.setValue(t.get('value_high', 255))
+            self.lr_spin.setValue(t.get('background_learning_rate', 0.01))
+            self.bg_check.setChecked(t.get('use_background_subtraction', True))
+        except Exception as e:
+            logger.error(f"Ошибка загрузки настроек: {e}")
+
+    def closeEvent(self, event):
         self.video_processor.close_video()
-        print("Приложение закрыто")
+        event.accept()

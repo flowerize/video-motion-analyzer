@@ -1,11 +1,12 @@
 """
-Точка входа в приложение
+Точка входа в приложение PyQt6
 """
-import os
 import sys
+import os
 
-# Добавляем src в путь для импортов
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+project_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src')
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from main import main
 

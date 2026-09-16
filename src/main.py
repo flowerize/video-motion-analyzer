@@ -1,38 +1,30 @@
 """
-Главный модуль приложения
+Главный модуль приложения PyQt6
 """
-import os
 import sys
+import logging
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import Qt
 
-# Добавляем текущую директорию в путь для импортов
-sys.path.insert(0, os.path.dirname(__file__))
-
-import customtkinter as ctk
-from gui.main_window import MainWindow
-from utils.constants import setup_theme, APP_SETTINGS
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
 def main():
-    """Запуск главного окна приложения"""
-    # Настройка темы
-    setup_theme()
+    logger.info("Запуск Video Motion Analyzer")
     
-    # Создание главного окна
-    root = ctk.CTk()
-    root.title("Video Motion Analyzer")
-    root.geometry(APP_SETTINGS["window_size"])
-    root.minsize(*APP_SETTINGS["min_window_size"])
+    app = QApplication(sys.argv)
+    app.setApplicationName("Video Motion Analyzer")
+    app.setStyle("Fusion")  # Кроссплатформенный стиль
     
-    # Создаем и запускаем главное окно
-    app = MainWindow(root)
+    from gui.main_window import MainWindow
+    window = MainWindow()
+    window.show()
     
-    # Обработка закрытия окна
-    def on_closing():
-        app.on_closing()
-        root.destroy()
-    
-    root.protocol("WM_DELETE_WINDOW", on_closing)
-    root.mainloop()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
