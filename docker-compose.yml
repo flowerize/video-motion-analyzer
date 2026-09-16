@@ -1,0 +1,10 @@
+version: "3.9"
+
+services:
+  video-motion-analyzer:
+    build: .
+    container_name: video-motion-analyzer
+    volumes:
+      - .:/app
+    stdin_open: true
+    tty: true
