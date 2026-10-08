@@ -245,7 +245,9 @@ class ResultsPanel:
         stats_text += f"Общее время: {analysis_results['total_time']:.2f} с\n"
         stats_text += f"Общее расстояние: {analysis_results['total_distance']:.2f} px\n"
         stats_text += f"Макс. скорость: {analysis_results['max_velocity']:.2f} px/с\n"
-        stats_text += f"Макс. ускорение: {analysis_results['max_acceleration']:.2f} px/с²\n"
+        stats_text += f"СКО скорости: {analysis_results.get('std_velocity', 0):.2f} px/с\n"
+        stats_text += f"СКО координат X: {analysis_results.get('std_x', 0):.2f} px\n"
+        stats_text += f"СКО координат Y: {analysis_results.get('std_y', 0):.2f} px\n"
         stats_text += f"Средняя скорость: {analysis_results['avg_velocity']:.2f} px/с\n"
         total_points = len(self.data_analyzer.data)
         stats_text += f"Количество точек: {total_points}\n"

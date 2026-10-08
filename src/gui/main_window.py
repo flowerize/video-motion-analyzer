@@ -10,13 +10,14 @@ from typing import Optional
 import cv2
 import numpy as np
 from PIL import Image
+import matplotlib.pyplot as plt
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QCheckBox, QSpinBox, QDoubleSpinBox,
     QSplitter, QFrame, QSlider, QTabWidget, QTextEdit, QMessageBox,
     QFileDialog, QProgressBar, QGroupBox, QFormLayout, QGridLayout,
-    QSizePolicy
+    QSizePolicy, QComboBox
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread
 from PyQt6.QtGui import QImage, QPixmap, QFont, QColor
@@ -157,6 +158,21 @@ class MainWindow(QMainWindow):
         self.track_check.stateChanged.connect(self.toggle_tracking)
         tracking_layout.addRow(self.track_check)
 
+        self.points_spin = QSpinBox()
+        self.points_spin.setRange(1, 5)
+        self.points_spin.setValue(5)
+        self.points_spin.setToolTip("Сколько точек отслеживать одновременно (1–5)")
+        self.points_spin.valueChanged.connect(self._on_points_changed)
+        tracking_layout.addRow("Кол-во точек:", self.points_spin)
+
+        self.dist_spin = QSpinBox()
+        self.dist_spin.setRange(2, 100)
+        self.dist_spin.setValue(15)
+        self.dist_spin.setSuffix(" px")
+        self.dist_spin.setToolTip("Максимальное смещение частицы между кадрами (гейт сопоставления)")
+        self.dist_spin.valueChanged.connect(self._on_distance_changed)
+        tracking_layout.addRow("Макс. смещение:", self.dist_spin)
+
         # HSV
         hsv_layout = QGridLayout()
         self.hue_low_spin = QSpinBox(); self.hue_low_spin.setRange(0, 180); self.hue_low_spin.setValue(0)
@@ -242,14 +258,29 @@ class MainWindow(QMainWindow):
         act_row.addWidget(self.export_btn)
         content_layout.addLayout(act_row)
 
+        # Particle selector (hidden until analysis)
+        self.particle_row = QWidget()
+        particle_layout = QHBoxLayout(self.particle_row)
+        particle_layout.setContentsMargins(0, 0, 0, 0)
+        particle_layout.addWidget(QLabel("Статистика частицы:"))
+        self.particle_combo = QComboBox()
+        self.particle_combo.setMinimumWidth(160)
+        self.particle_combo.currentIndexChanged.connect(self._on_particle_changed)
+        particle_layout.addWidget(self.particle_combo)
+        particle_layout.addStretch()
+        self.particle_row.setVisible(False)
+        content_layout.addWidget(self.particle_row)
+
         # Results panel (hidden initially)
         self.results_tabs = QTabWidget()
         self.results_tabs.setVisible(False)
         content_layout.addWidget(self.results_tabs)
 
-        # Add placeholder tabs
-        for name in ("Траектория", "Скорость", "Ускорение", "Статистика"):
-            self.results_tabs.addTab(QWidget(), name)
+        # Add placeholder tabs with proper parent
+        for name in ("Траектория", "Скорость", "СКО", "Статистика"):
+            container = QWidget()
+            container.setLayout(QVBoxLayout())
+            self.results_tabs.addTab(container, name)
 
         self.back_btn = QPushButton("← Назад к видео")
         self.back_btn.setVisible(False)
@@ -301,9 +332,12 @@ class MainWindow(QMainWindow):
         """Получен кадр из потока воспроизведения"""
         try:
             display = frame.copy()
-            t = time.time() - self.start_time
 
-            if self.is_tracking:
+            if self.is_tracking and self.video_processor.is_opened():
+                # Use real video timestamp based on frame position and FPS
+                cur_frame = int(self.video_processor.cap.get(cv2.CAP_PROP_POS_FRAMES))
+                fps = self.video_processor.cap.get(cv2.CAP_PROP_FPS)
+                t = cur_frame / fps if fps > 0 else float(cur_frame)
                 tracks = self.object_tracker.process_frame(frame, t)
                 if tracks:
                     display = self.object_tracker.draw_tracking_info(display)
@@ -398,6 +432,14 @@ class MainWindow(QMainWindow):
             self.tracking_status_lbl.setStyleSheet("")
             self.statusBar().showMessage("Трекинг остановлен")
 
+    def _on_points_changed(self, value: int):
+        self.object_tracker.set_max_tracks(value)
+        self.statusBar().showMessage(f"Отслеживаемых точек: {value}")
+
+    def _on_distance_changed(self, value: int):
+        self.object_tracker.set_max_track_distance(value)
+        self.statusBar().showMessage(f"Макс. смещение: {value} px")
+
     def apply_tracking_settings(self):
         settings = {
             'hue_low': self.hue_low_spin.value(),
@@ -408,13 +450,18 @@ class MainWindow(QMainWindow):
             'value_high': self.val_high_spin.value(),
             'use_background_subtraction': self.bg_check.isChecked(),
             'background_learning_rate': self.lr_spin.value(),
+            'max_tracks': self.points_spin.value(),
+            'max_track_distance': self.dist_spin.value(),
         }
         self.object_tracker.update_settings({
             k: v for k, v in settings.items()
-            if k not in ('use_background_subtraction', 'background_learning_rate')
+            if k not in ('use_background_subtraction', 'background_learning_rate',
+                         'max_tracks', 'max_track_distance')
         })
         self.object_tracker.set_use_background_subtraction(settings['use_background_subtraction'])
         self.object_tracker.set_background_learning_rate(settings['background_learning_rate'])
+        self.object_tracker.set_max_tracks(settings['max_tracks'])
+        self.object_tracker.set_max_track_distance(settings['max_track_distance'])
 
         try:
             self.config.set_tracking_settings(settings)
@@ -434,95 +481,112 @@ class MainWindow(QMainWindow):
             return
 
         self.data_analyzer.load_data(data)
-        self.data_analyzer.analyze_movement()
+        track_ids = self.data_analyzer.get_track_ids()
+        if not track_ids:
+            QMessageBox.warning(self, "Нет данных", "Не найдено ни одной частицы.")
+            return
+
+        self.particle_combo.blockSignals(True)
+        self.particle_combo.clear()
+        for tid in track_ids:
+            self.particle_combo.addItem(f"Частица {tid}", tid)
+        self.particle_combo.setCurrentIndex(0)
+        self.particle_combo.blockSignals(False)
 
         # Hide video, show results
         self.video_label.setVisible(False)
         self.progress.setVisible(False)
         self.back_btn.setVisible(True)
+        self.particle_row.setVisible(True)
         self.results_tabs.setVisible(True)
 
-        # Plot trajectory
+        self._update_analysis_view()
+
+        self.statusBar().showMessage(f"Частиц: {len(track_ids)}, точек: {len(data)}")
+
+    def _on_particle_changed(self, index: int):
+        if index >= 0:
+            self._update_analysis_view()
+
+    def _update_analysis_view(self):
+        track_id = self.particle_combo.currentData()
+        if track_id is None:
+            return
+        results = self.data_analyzer.select_track(track_id)
+        if not results:
+            return
+
         fig = self.data_analyzer.create_trajectory_plot()
         self._embed_plot(fig, 0)
         plt.close(fig)
 
-        # Plot velocity
         fig = self.data_analyzer.create_velocity_plot()
         self._embed_plot(fig, 1)
         plt.close(fig)
 
-        # Plot acceleration
-        fig = self.data_analyzer.create_acceleration_plot()
-        if fig:
-            self._embed_plot(fig, 2)
-            plt.close(fig)
+        fig = self.data_analyzer.create_std_plot()
+        self._embed_plot(fig, 2)
+        plt.close(fig)
 
-        # Stats
-        self._update_stats(self.data_analyzer.analysis_results)
-
-        self.statusBar().showMessage(f"Анализ: {len(data)} точек")
+        self._update_stats(results)
 
     def _embed_plot(self, fig, tab_index: int):
-        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
-        canvas = FigureCanvasQTAgg(fig)
-        canvas.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as Canvas
+        container = self.results_tabs.widget(tab_index)
+        layout = container.layout()
+        # Remove old canvases safely
+        for i in reversed(range(layout.count())):
+            child = layout.itemAt(i)
+            if child and child.widget():
+                child.widget().deleteLater()
+        canvas = Canvas(fig)
+        canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout.addWidget(canvas)
+        fig.tight_layout()
         canvas.draw()
-        self.results_tabs.widget(tab_index).setLayout(QVBoxLayout())
-        self.results_tabs.widget(tab_index).layout().addWidget(canvas)
 
     def _update_stats(self, results: dict):
+        container = self.results_tabs.widget(3)
+        layout = container.layout()
+        # Remove old widgets safely
+        for i in reversed(range(layout.count())):
+            child = layout.itemAt(i)
+            if child and child.widget():
+                child.widget().deleteLater()
+
         text_edit = QTextEdit()
         text_edit.setReadOnly(True)
 
         lines = [
-            "=== СТАТИСТИКА АНАЛИЗА ===",
-            f"Общее время: {results['total_time']:.2f} с",
-            f"Общее расстояние: {results['total_distance']:.2f} px",
-            f"Макс. скорость: {results['max_velocity']:.2f} px/с",
-            f"Макс. ускорение: {results['max_acceleration']:.2f} px/с²",
-            f"Средняя скорость: {results['avg_velocity']:.2f} px/с",
-            f"Количество точек: {len(self.data_analyzer.data)}",
+            f"=== СТАТИСТИКА ЧАСТИЦЫ ID {results.get('track_id')} ===",
+            f"Количество точек: {results.get('n_points', 0)}",
+            f"Время наблюдения: {results.get('total_time', 0):.2f} с",
+            f"Пройденный путь: {results.get('total_distance', 0):.2f} px",
+            f"Средняя скорость: {results.get('avg_velocity', 0):.2f} px/с",
+            f"Макс. скорость: {results.get('max_velocity', 0):.2f} px/с",
+            f"СКО скорости: {results.get('std_velocity', 0):.2f} px/с",
+            f"СКО координаты X: {results.get('std_x', 0):.2f} px",
+            f"СКО координаты Y: {results.get('std_y', 0):.2f} px",
+            f"СКО положения: {results.get('std_position', 0):.2f} px",
         ]
 
-        tids = [p.get('track_id') for p in self.data_analyzer.data if p.get('track_id')]
-        unique = len(set(tids))
-        lines.append(f"Количество треков: {unique}")
-
-        if unique:
-            lines.append("\n=== ДЕТАЛИ ТРЕКИНГА ===")
-            latest = {}
-            for p in self.data_analyzer.data:
-                tid = p.get('track_id')
-                if tid is not None:
-                    latest[tid] = p
-            recent = sorted(latest.values(), key=lambda p: p['timestamp'], reverse=True)
-            for p in recent[:5]:
-                lines.append(f"  ID {p['track_id']}: ({p['x']}, {p['y']}) v={p.get('velocity', 0):.1f} px/с")
-            if len(recent) > 5:
-                lines.append(f"  ... и ещё {len(recent) - 5} треков")
-
         text_edit.setPlainText("\n".join(lines))
-        self.results_tabs.widget(3).setLayout(QVBoxLayout())
-        self.results_tabs.widget(3).layout().addWidget(text_edit)
+        layout.addWidget(text_edit)
 
     def _show_video(self):
         self.results_tabs.setVisible(False)
+        self.particle_row.setVisible(False)
         self.back_btn.setVisible(False)
         self.video_label.setVisible(True)
         self.progress.setVisible(True)
-        # Clear plots
+        # Clear plots from each tab container safely
         for i in range(4):
-            widget = self.results_tabs.widget(i)
-            layout = widget.layout()
-            if layout:
-                while layout.count():
-                    child = layout.takeAt(0)
-                    if child.widget():
-                        child.widget().deleteLater()
-                widget.setLayout(None)
+            container = self.results_tabs.widget(i)
+            layout = container.layout()
+            for j in reversed(range(layout.count())):
+                child = layout.itemAt(j)
+                if child and child.widget():
+                    child.widget().deleteLater()
 
     def export_data(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -545,7 +609,7 @@ class MainWindow(QMainWindow):
         self.is_tracking = False
 
         self.video_label.setText("Загрузите видео для начала анализа")
-        self.video_label.setPixmap(None)
+        self.video_label.clear()
         self.video_info.setText("Видео не загружено")
         self.play_btn.setEnabled(False)
         self.pause_btn.setEnabled(False)
@@ -569,6 +633,8 @@ class MainWindow(QMainWindow):
             self.val_high_spin.setValue(t.get('value_high', 255))
             self.lr_spin.setValue(t.get('background_learning_rate', 0.01))
             self.bg_check.setChecked(t.get('use_background_subtraction', True))
+            self.points_spin.setValue(int(t.get('max_tracks', 5)))
+            self.dist_spin.setValue(int(t.get('max_track_distance', 15)))
         except Exception as e:
             logger.error(f"Ошибка загрузки настроек: {e}")
 

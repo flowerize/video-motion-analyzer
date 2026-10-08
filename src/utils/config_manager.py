@@ -16,7 +16,9 @@ DEFAULT_CONFIG = {
         "min_area": 100, "max_area": 50000,
         "blur_size": 5, "morph_iters": 2,
         "use_background_subtraction": True,
-        "background_learning_rate": 0.01
+        "background_learning_rate": 0.01,
+        "max_tracks": 5,
+        "max_track_distance": 15
     },
     "recent_files": []
 }
